@@ -45,10 +45,9 @@ class LocoLayer(nn.Module):
         as gradient for const is not needed, we can simplify:
         return (F(pre_act) - torch.einsum("bf,bf->b", const, pre_act)).mean()
         """
-        pre_act = self.module(x).flatten(start_dim=1)
+        pre_act = self.module(x)
         out = function_mapping[type(self.activation)](pre_act)
-        torch.autograd.backward([out, pre_act], [torch.full_like(out, 1 / x.size(0)), -y / x.size(0)])
-
+        torch.autograd.backward([out, pre_act], [torch.full_like(pre_act, 1 / x.size(0)), -y / x.size(0)])
 
 
 class LocopropTrainer:
