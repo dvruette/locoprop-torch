@@ -1,18 +1,15 @@
-import functools
-import math
 import typing
 import warnings
 
 import torch
-import torch.nn as nn
-
-
+from torch import nn
+from torch.nn import functional as F
 
 function_mapping = {nn.Sigmoid: lambda x: (x + (1 + (-x).exp()).log()).sum(dim=-1),
                     nn.Tanh: lambda x: (x + (1 + (-x).exp()).log()).sum(dim=-1),
                     nn.ReLU: lambda x: 0.5 * (x * F.relu(x)).sum(dim=-1),
                     nn.Softmax: lambda x: torch.logsumexp(x, dim=-1)
-                   }
+                    }
 
 
 class LocoLayer(nn.Module):
@@ -25,9 +22,7 @@ class LocoLayer(nn.Module):
 
     def forward(self, x=None, hidden=None):
         if x is None and hidden is None:
-            raise ValueError(
-                "No argument was given. Provide either input or hidden state."
-            )
+            raise ValueError("No argument was given. Provide either input or hidden state.")
 
         if hidden is None:
             hidden = self.module(x)
@@ -36,49 +31,39 @@ class LocoLayer(nn.Module):
             return hidden
         return self.activation(hidden)
 
-    def hidden(self, x):
-        return self.module(x)
-
-    def _pseudo_inverse(self, target):
-        with torch.no_grad():
-            # compute pseudo-inverse of y
-            if isinstance(self.activation, nn.Sigmoid):
-                a = y.clip(self.eps, 1 - self.eps)
-                return torch.log(a / (1 - a))
-            elif isinstance(self.activation, nn.Tanh):
-                a = (y + 1) / 2
-                a = a.clip(self.eps, 1 - self.eps)
-                return 0.5 * torch.log(a / (1 - a))
-            elif isinstance(self.activation, nn.ReLU):
-                y = y.clip(0, None)
-                return y  # y if y > 0 else 0 => already ReLU
-            elif isinstance(self.activation, nn.Softmax):
-                return y.log()
-        raise ValueError(f"Unsupported activation function: {self.activation}")
-        
-    
     def bregman_loss(self, x, y):
-        pre_act = self.module(x).flatten(start_dim=1)
+        """
+        f := function_mapping[type(self.activation)](pre_act)
+
+        original:
         a = self._pseudo_inverse(y).flatten(start_dim=1)
-        
-        F = function_mapping[self.activation]
         return F(pre_act) - F(a) - torch.einsum("bf,bf->b", self.activation(a), pre_act - a)
+
+        with y := const:
+        return F(pre_act) - const - torch.einsum("bf,bf->bf", const, pre_act - const)
+
+        as gradient for const is not needed, we can simplify:
+        return F(pre_act) - torch.einsum("bf,bf->b", const, pre_act)
+        """
+        pre_act = self.module(x).flatten(start_dim=1)
+        return function_mapping[type(self.activation)](pre_act) - torch.einsum("bf,bf->b", y, pre_act)
+
 
 
 class LocopropTrainer:
     def __init__(
-        self,
-        model: nn.Sequential,
-        loss_fn: typing.Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-        optimizer_class=torch.optim.RMSprop,
-        optimizer_hparams: typing.Dict = dict(
-            lr=2e-5, eps=1e-6, momentum=0.999, alpha=0.9
-        ),
-        learning_rate: float = 10,
-        local_iterations: int = 5,
-        variant: typing.Literal["LocoPropS", "LocoPropM"] = "LocoPropM",
-        momentum: float = 0.0,
-        correction: float = 0.1,
+            self,
+            model: nn.Sequential,
+            loss_fn: typing.Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+            optimizer_class=torch.optim.RMSprop,
+            optimizer_hparams: typing.Dict = dict(
+                lr=2e-5, eps=1e-6, momentum=0.999, alpha=0.9
+            ),
+            learning_rate: float = 10,
+            local_iterations: int = 5,
+            variant: typing.Literal["LocoPropS", "LocoPropM"] = "LocoPropM",
+            momentum: float = 0.0,
+            correction: float = 0.1,
     ):
         self.model = model
         self.loss_fn = loss_fn
@@ -106,7 +91,7 @@ class LocopropTrainer:
                 self.opts.append(None)
         self.grads = []
         self._step = 0
-        
+
     def step(self, xs, ys):
         self._step += 1
         inps = []
@@ -116,7 +101,7 @@ class LocopropTrainer:
         for layer, opt in zip(self.model, self.opts):
             inps.append(curr.detach())
             if opt is not None and isinstance(layer, LocoLayer):
-                hidden = layer.hidden(curr)
+                hidden = layer.module(curr)
                 hidden.requires_grad_(True)
                 hidden.retain_grad()
                 hiddens.append(hidden)
@@ -133,7 +118,8 @@ class LocopropTrainer:
             self.grads = grads
         else:
             debias = (1 - (1 - self.momentum) ** self._step)
-            self.grads = [None if m is None else ((1 - self.momentum) * g + self.momentum * m) / debias for g, m in zip(grads, self.grads)]
+            self.grads = [None if m is None else ((1 - self.momentum) * g + self.momentum * m) / debias for g, m in
+                          zip(grads, self.grads)]
 
         for p in self.model.parameters():
             p.requires_grad = True
@@ -142,11 +128,12 @@ class LocopropTrainer:
             if opt is None:
                 continue
             if not isinstance(layer, LocoLayer):
-                raise ValueError(f"Expected trainable layers to be instance of `LocoLayer` but found `{layer.__class__}`")
+                raise ValueError(
+                    f"Expected trainable layers to be instance of `LocoLayer` but found `{layer.__class__}`")
 
             inp = inps[i]
             with torch.no_grad():
-                a = layer.hidden(inp)
+                a = layer.module(inp)
                 y = layer.activation(a)
                 post_target = (y - self.learning_rate * grad).detach()
 
