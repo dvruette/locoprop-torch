@@ -5,12 +5,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-function_mapping = {nn.Sigmoid: lambda x: x + (1 + (-x).exp()).log(),
-                    nn.Tanh: lambda x: x + (1 + (-x).exp()).log(),
-                    nn.ReLU: lambda x: 0.5 * x * F.relu(x),
-                    nn.Softmax: lambda x: torch.logsumexp(x, dim=-1)
-                    }
-
 
 class LocoLayer(nn.Module):
     def __init__(self, module, activation, implicit=False, eps=1e-5):
@@ -43,11 +37,16 @@ class LocoLayer(nn.Module):
         return F(pre_act) - const - torch.einsum("bf,bf->bf", const, pre_act - const)
 
         as gradient for const is not needed, we can simplify:
-        return (F(pre_act) - torch.einsum("bf,bf->b", const, pre_act)).mean()
+        return (F(pre_act) - torch.einsum("bf,bf->b", const, pre_act)).sum()
+
+        the einsum can further be integrated using
+        backward(outputs=[F(pre_act), pre_act], grad_outputs=[ones_like(pre_act), -const])
+
+        since grad(F)(x) == f, this can be computed as
+        backward(outputs=[pre_act], grad_outputs=[f(pre_act) - const])
         """
         pre_act = self.module(x)
-        out = function_mapping[type(self.activation)](pre_act)
-        torch.autograd.backward([out, pre_act], [torch.full_like(pre_act, 1 / x.size(0)), -y / x.size(0)])
+        torch.autograd.backward([pre_act], [(self.activation(pre_act) - y) / x.size(0)])
 
 
 class LocopropTrainer:
@@ -56,9 +55,7 @@ class LocopropTrainer:
             model: nn.Sequential,
             loss_fn: typing.Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
             optimizer_class=torch.optim.RMSprop,
-            optimizer_hparams: typing.Dict = dict(
-                lr=2e-5, eps=1e-6, momentum=0.999, alpha=0.9
-            ),
+            optimizer_hparams: typing.Dict = dict(lr=2e-5, eps=1e-6, momentum=0.999, alpha=0.9),
             learning_rate: float = 10,
             local_iterations: int = 5,
             variant: typing.Literal["LocoPropS", "LocoPropM"] = "LocoPropM",
