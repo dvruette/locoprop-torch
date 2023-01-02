@@ -5,9 +5,9 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-function_mapping = {nn.Sigmoid: lambda x: (x + (1 + (-x).exp()).log()).sum(dim=-1),
-                    nn.Tanh: lambda x: (x + (1 + (-x).exp()).log()).sum(dim=-1),
-                    nn.ReLU: lambda x: 0.5 * (x * F.relu(x)).sum(dim=-1),
+function_mapping = {nn.Sigmoid: lambda x: x + (1 + (-x).exp()).log(),
+                    nn.Tanh: lambda x: x + (1 + (-x).exp()).log(),
+                    nn.ReLU: lambda x: 0.5 * x * F.relu(x),
                     nn.Softmax: lambda x: torch.logsumexp(x, dim=-1)
                     }
 
@@ -43,10 +43,11 @@ class LocoLayer(nn.Module):
         return F(pre_act) - const - torch.einsum("bf,bf->bf", const, pre_act - const)
 
         as gradient for const is not needed, we can simplify:
-        return F(pre_act) - torch.einsum("bf,bf->b", const, pre_act)
+        return (F(pre_act) - torch.einsum("bf,bf->b", const, pre_act)).mean()
         """
         pre_act = self.module(x).flatten(start_dim=1)
-        return function_mapping[type(self.activation)](pre_act) - torch.einsum("bf,bf->b", y, pre_act)
+        out = function_mapping[type(self.activation)](pre_act)
+        torch.autograd.backward([out, pre_act], [torch.full_like(out, 1 / x.size(0)), -y / x.size(0)])
 
 
 
@@ -142,8 +143,7 @@ class LocopropTrainer:
                 opt.param_groups[0]["lr"] = base_lr * max(1.0 - j / self.local_iterations, 0.25)
                 opt.zero_grad()
 
-                loss = layer.bregman_loss(inp, post_target).mean()
-                loss.backward()
+                layer.bregman_loss(inp, post_target)
                 opt.step()
             opt.param_groups[0]["lr"] = base_lr
 
