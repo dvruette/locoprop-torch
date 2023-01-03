@@ -7,12 +7,11 @@ from torch.nn import functional as F
 
 
 class LocoLayer(nn.Module):
-    def __init__(self, module, activation, implicit=False, eps=1e-5):
+    def __init__(self, module, activation, implicit=False):
         super().__init__()
         self.module = module
         self.activation = activation
         self.implicit = implicit
-        self.eps = eps
 
     def forward(self, x=None, hidden=None):
         if x is None and hidden is None:
@@ -25,29 +24,6 @@ class LocoLayer(nn.Module):
             return hidden
         return self.activation(hidden)
 
-    def bregman_loss(self, x, y):
-        """
-        f := function_mapping[type(self.activation)](pre_act)
-
-        original:
-        a = self._pseudo_inverse(y).flatten(start_dim=1)
-        return F(pre_act) - F(a) - torch.einsum("bf,bf->b", self.activation(a), pre_act - a)
-
-        with y := const:
-        return F(pre_act) - const - torch.einsum("bf,bf->bf", const, pre_act - const)
-
-        as gradient for const is not needed, we can simplify:
-        return (F(pre_act) - torch.einsum("bf,bf->b", const, pre_act)).sum()
-
-        the einsum can further be integrated using
-        backward(outputs=[F(pre_act), pre_act], grad_outputs=[ones_like(pre_act), -const])
-
-        since grad(F)(x) == f, this can be computed as
-        backward(outputs=[pre_act], grad_outputs=[f(pre_act) - const])
-        """
-        pre_act = self.module(x)
-        torch.autograd.backward([pre_act], [(self.activation(pre_act) - y) / x.size(0)])
-
 
 class LocopropTrainer:
     def __init__(
@@ -58,7 +34,6 @@ class LocopropTrainer:
             optimizer_hparams: typing.Dict = dict(lr=2e-5, eps=1e-6, momentum=0.999, alpha=0.9),
             learning_rate: float = 10,
             local_iterations: int = 5,
-            variant: typing.Literal["LocoPropS", "LocoPropM"] = "LocoPropM",
             momentum: float = 0.0,
             correction: float = 0.1,
     ):
@@ -66,7 +41,6 @@ class LocopropTrainer:
         self.loss_fn = loss_fn
         self.learning_rate = learning_rate
         self.local_iterations = local_iterations
-        self.variant = variant
         self.momentum = momentum
         self.correction = correction
 
@@ -87,10 +61,8 @@ class LocopropTrainer:
             else:
                 self.opts.append(None)
         self.grads = []
-        self._step = 0
 
     def step(self, xs, ys):
-        self._step += 1
         inps = []
         hiddens = []
         curr = xs
@@ -111,17 +83,17 @@ class LocopropTrainer:
         hidden_loss.backward()
 
         grads = [None if h is None or not hasattr(h, "grad") or h.grad is None else h.grad for h in hiddens]
-        if len(self.grads) == 0:
-            self.grads = grads
-        else:
-            debias = (1 - (1 - self.momentum) ** self._step)
-            self.grads = [None if m is None else ((1 - self.momentum) * g + self.momentum * m) / debias for g, m in
-                          zip(grads, self.grads)]
+        if self.momentum > 0:
+            if len(self.grads) == 0:
+                self.grads = grads
+            else:
+                self.grads = [None if m is None else (1 - self.momentum) * g + self.momentum * m for g, m in zip(grads, self.grads)]
+            grads = self.grads
 
         for p in self.model.parameters():
             p.requires_grad = True
 
-        for i, (opt, layer, grad) in enumerate(zip(self.opts, self.model, self.grads)):
+        for i, (opt, layer, grad) in enumerate(zip(self.opts, self.model, grads)):
             if opt is None:
                 continue
             if not isinstance(layer, LocoLayer):
@@ -139,7 +111,27 @@ class LocopropTrainer:
                 opt.param_groups[0]["lr"] = base_lr * max(1.0 - j / self.local_iterations, 0.25)
                 opt.zero_grad()
 
-                layer.bregman_loss(inp, post_target)
+                """
+                Let `f := "activation function"` and `y = post_target`.
+
+                original:
+                ```
+                a = pseudo_inverse(y)
+                return grad((F(pre_act) - F(a) - f(a)^T * (pre_act - a)).sum())
+                ```
+
+                Since `a` is constant w.r.t. `pre_act`, it does not require gradients, so we can simplify:
+                `return grad((F(pre_act) - y^T * pre_act).sum())`
+                with `f(a) = f(pseudo_inverse(y)) = y` by definition of the pseudo-inverse.
+
+                The einsum can further be integrated using:
+                `backward(outputs=[F(pre_act), pre_act], grad_outputs=[ones_like(pre_act), -y])`
+
+                since `grad(F)(x) = f` by definition of `F`, this can be computed as:
+                `backward(outputs=[pre_act], grad_outputs=[f(pre_act) - y])`
+                """
+                pre_act = layer.module(inp)
+                torch.autograd.backward([pre_act], [(layer.activation(pre_act) - post_target) / inp.size(0)])
                 opt.step()
             opt.param_groups[0]["lr"] = base_lr
 
@@ -149,4 +141,5 @@ class LocopropTrainer:
                     delta = layer(inp) - inps[i + 1]
                     norm = delta.norm() + 1e-5
                     inps[i + 1] += min(norm, self.correction * delta.size(1) ** 0.5) * delta / norm
+
         return hidden_loss
