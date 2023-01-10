@@ -24,17 +24,16 @@ class LocoConvNet(nn.Sequential):
             padding=2,
             activation_cls=nn.Tanh,
     ):
-        lctx = LocopropCtx()
         super().__init__()
         self.add_module(
             "stage_0",
-            LocoLayer(nn.Conv2d(1, 16, kernel_size, stride, padding), activation_cls(), lctx),
+            LocoLayer(nn.Conv2d(1, 16, kernel_size, stride, padding), activation_cls()),
         )
         self.add_module("pool_0", nn.MaxPool2d(2))
         self.add_module(
             "stage_1",
             LocoLayer(
-                nn.Conv2d(16, 32, kernel_size, stride, padding), activation_cls(), lctx
+                nn.Conv2d(16, 32, kernel_size, stride, padding), activation_cls()
             ),
         )
         self.add_module("pool_1", nn.MaxPool2d(2))
@@ -44,7 +43,6 @@ class LocoConvNet(nn.Sequential):
             LocoLayer(
                 nn.Linear(32 * 7 * 7, classes, bias=False),
                 nn.Softmax(dim=-1),
-                lctx,
                 implicit=True,
             ),
         )

@@ -2,7 +2,6 @@ import copy
 import dataclasses
 import typing
 
-import pytorch_lightning as pl
 import torch
 from torch import nn
 
@@ -16,10 +15,12 @@ class LocopropCtx:
 
 
 class LocoLayer(nn.Module):
-    def __init__(self, module: nn.Module, activation: nn.Module, lctx: LocopropCtx, **kwargs):
+    def __init__(self, module: nn.Module, activation: nn.Module, lctx: typing.Optional[LocopropCtx] = None, **kwargs):
         super().__init__()
         self.module = module
         self.activation = activation
+        if lctx is None:
+            lctx = LocopropCtx()
         self.lctx = copy.deepcopy(lctx)
         for k, v in kwargs:
             setattr(self.lctx, k, v)
@@ -34,7 +35,7 @@ class LocoLayer(nn.Module):
         if not self.lctx.implicit:
             hidden = self.activation(hidden)
 
-        return locofn(self, hidden, self.lctx, (x, None), {})
+        return locofn(self, hidden, self.lctx, (x,), {})
 
 
 class LocoFn(torch.autograd.Function):
@@ -51,7 +52,7 @@ class LocoFn(torch.autograd.Function):
         ctx.module.requires_grad_(True)
         opt = torch.optim.SGD(ctx.module.parameters(), ctx.lctx.base_lr)
         original_params = {n: p.clone() for n, p in ctx.module.named_parameters()}
-        for i in range(ctx.iterations):
+        for i in range(ctx.lctx.iterations):
             opt.param_groups[0]["lr"] = ctx.lctx.base_lr * max(1.0 - i / ctx.lctx.iterations, 0.25)
             with torch.enable_grad():
                 out = ctx.module.module(*ctx.args, **ctx.kwargs)
@@ -69,5 +70,3 @@ class LocoFn(torch.autograd.Function):
 
 
 locofn = LocoFn.apply
-
-
