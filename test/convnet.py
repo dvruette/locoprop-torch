@@ -1,13 +1,13 @@
-import time
+import typing
 
-import tqdm
+import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from torch.utils.data import DataLoader
 
-from locoprop import LocoLayer, LocopropTrainer
+from locoprop import LocoLayer, LocopropCtx
 
 
 class Flatten(nn.Module):
@@ -17,12 +17,12 @@ class Flatten(nn.Module):
 
 class LocoConvNet(nn.Sequential):
     def __init__(
-        self,
-        classes=10,
-        kernel_size=5,
-        stride=1,
-        padding=2,
-        activation_cls=nn.Tanh,
+            self,
+            classes=10,
+            kernel_size=5,
+            stride=1,
+            padding=2,
+            activation_cls=nn.Tanh,
     ):
         super().__init__()
         self.add_module(
@@ -48,6 +48,26 @@ class LocoConvNet(nn.Sequential):
         )
 
 
+class TrainedModel(pl.LightningModule):
+    def __init__(self, module: nn.Module, loss: typing.Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+                 optimizer_class: type = torch.optim.RMSprop,
+                 optimizer_hparams: typing.Dict[str, typing.Any] = dict(lr=2e-5, eps=1e-6, momentum=0.999, alpha=0.9)):
+        super().__init__()
+        self.mod = module
+        self.loss = loss
+        self.optimizer_class = optimizer_class
+        self.optimizer_hparams = optimizer_hparams
+
+    def forward(self, *args, **kwargs):
+        return self.mod(*args, **kwargs)
+
+    def training_step(self, batch, batch_idx):
+        return self.loss(self(batch[0]), batch[1])
+
+    def configure_optimizers(self):
+        return self.optimizer_class(self.parameters(), **self.optimizer_hparams)
+
+
 def get_dataloaders(batch_size=128):
     transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
     train_ds = torchvision.datasets.MNIST(
@@ -69,68 +89,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(1)
 
-    model = LocoConvNet().to(device)
+    model = TrainedModel(LocoConvNet(), loss_fn).to(device)
     train_dl, test_dl = get_dataloaders(1000)
-    trainer = LocopropTrainer(
-        model,
-        loss_fn,
-        learning_rate=100,
-        local_iterations=5,
-        optimizer_hparams=dict(lr=2e-5, eps=1e-5, momentum=0.999, alpha=0.9),
-    )
-
-    train_losses, test_losses, test_accs, times = [], [], [], []
-
-    with torch.no_grad():
-        train_ls = []
-        for xs, ys in train_dl:
-            xs, ys = xs.to(device), ys.to(device)
-            logits = model(xs)
-            loss = loss_fn(logits, ys)
-            train_ls.append(loss.item() * xs.size(0))
-        train_loss = sum(train_ls) / len(train_dl.dataset)
-        train_losses.append(train_loss)
-
-        model.eval()
-        test_ls = []
-        for xs, ys in test_dl:
-            xs, ys = xs.to(device), ys.to(device)
-            logits = model(xs)
-            loss = loss_fn(logits, ys)
-            test_ls.append(loss.item() * xs.size(0))
-        test_loss = sum(test_ls) / len(test_dl.dataset)
-        test_losses.append(test_loss)
-    times.append(0)
-
-    start_time = time.time()
-
-    for epoch in tqdm.trange(50, desc="Epochs"):
-        model.train()
-        train_ls = []
-        for xs, ys in train_dl:
-            xs, ys = xs.to(device), ys.to(device)
-
-            loss = trainer.step(xs, ys)
-            train_ls.append(loss.detach().item() * xs.size(0))
-
-        train_loss = sum(train_ls) / len(train_dl.dataset)
-        train_losses.append(train_loss)
-
-        with torch.no_grad():
-            model.eval()
-            test_ls, test_as = [], []
-            for xs, ys in test_dl:
-                xs, ys = xs.to(device), ys.to(device)
-                logits = model(xs)
-                loss = loss_fn(logits, ys)
-                acc = (logits.argmax(dim=-1) == ys).float().mean()
-                test_ls.append(loss.item() * xs.size(0))
-                test_as.append(acc.item() * xs.size(0))
-            test_loss = sum(test_ls) / len(test_dl.dataset)
-            test_acc = sum(test_as) / len(test_dl.dataset)
-            test_losses.append(test_loss)
-            test_accs.append(test_acc)
-        times.append(time.time() - start_time)
-        print(
-            f"Epoch {epoch+1:2d}: {train_loss=:.4f} | {test_loss=:.4f} | {test_acc=:.4f}"
-        )
+    trainer = pl.Trainer(max_epochs=50)
+    trainer.fit(model, train_dl, test_dl)

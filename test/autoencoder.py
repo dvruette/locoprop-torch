@@ -1,15 +1,14 @@
 import time
 
-import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
+import tqdm
 from torch.utils.data import DataLoader
 
 from locoprop import LocoLayer, LocopropTrainer
-
-
+torch.autograd.grad()
 """
 Dataset: MNIST
 Model: Deep autoencoder (784, 1000, 500, 250, 30, 250, 500, 1000, 784)
@@ -20,27 +19,19 @@ Optimizer: LocoProp (RMSprop)
 
 class LocoNet(nn.Sequential):
     def __init__(
-        self,
-        input_dim=784,
-        output_dim=784,
-        hidden_dims=[1000, 500, 250, 30, 250, 500, 1000],
-        activation_cls=nn.Tanh,
+            self,
+            input_dim=784,
+            output_dim=784,
+            hidden_dims=[1000, 500, 250, 30, 250, 500, 1000],
+            activation_cls=nn.Tanh,
     ):
         super().__init__()
-        self.add_module(
-            "input", LocoLayer(nn.Linear(input_dim, hidden_dims[0]), activation_cls())
-        )
+        self.add_module("input", LocoLayer(nn.Linear(input_dim, hidden_dims[0]), activation_cls()))
         for i, (d_in, d_out) in enumerate(zip(hidden_dims[:-1], hidden_dims[1:])):
-            self.add_module(
-                f"stage{i}", LocoLayer(nn.Linear(d_in, d_out), activation_cls())
-            )
+            self.add_module(f"stage{i}", LocoLayer(nn.Linear(d_in, d_out), activation_cls()))
         self.add_module(
             "output",
-            LocoLayer(
-                nn.Linear(hidden_dims[-1], output_dim, bias=False),
-                nn.Sigmoid(),
-                implicit=True,
-            ),
+            LocoLayer(nn.Linear(hidden_dims[-1], output_dim, bias=False), nn.Sigmoid(), implicit=True),
         )
 
 
@@ -121,4 +112,4 @@ def main():
             test_loss = sum(test_ls) / len(test_dl.dataset)
             test_losses.append(test_loss)
         times.append(time.time() - start_time)
-        print(f"Epoch {epoch+1:2d}: {train_loss=:.2f} | {test_loss=:.2f}")
+        print(f"Epoch {epoch + 1:2d}: {train_loss=:.2f} | {test_loss=:.2f}")
