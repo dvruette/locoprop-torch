@@ -27,7 +27,8 @@ class LocoLayer(nn.Module):
         self.lctx = copy.deepcopy(lctx)
         for k, v in kwargs.items():
             setattr(self.lctx, k, v)
-        self.opt = torch.optim.RMSprop(module.parameters(), lr=lctx.base_lr, eps=lctx.eps, momentum=lctx.momentum, alpha=lctx.alpha)
+        self.opt = torch.optim.RMSprop(module.parameters(), lr=lctx.base_lr, eps=lctx.eps, momentum=lctx.momentum,
+                                       alpha=lctx.alpha)
 
     def inner(self, x):
         hidden = self.module(x)
@@ -66,9 +67,9 @@ class LocoFn(torch.autograd.Function):
             torch.autograd.backward([act], [(act - post_target) / out.size(0)], inputs=list(ctx.module.parameters()))
             ctx.opt.step()
             ctx.opt.zero_grad()
-        for n, p in ctx.module.named_parameters():
-            p.grad = original_params[n].data - p.data
-            p.data.set_(original_params[n].data)
+        # for n, p in ctx.module.named_parameters():
+        #    p.grad = original_params[n].data - p.data
+        #    p.data.set_(original_params[n].data)
         return None, None, None, next_grad
 
 
