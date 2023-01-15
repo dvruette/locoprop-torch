@@ -75,6 +75,6 @@ class LocoFn(torch.autograd.Function):
 
         for n, p in ctx.module.named_parameters():
             p.grad = original_params[n].data - p.data
-            p.data = original_params[n].data
+            p.set_(original_params[n].data)
 
         return None, None, next_grad
