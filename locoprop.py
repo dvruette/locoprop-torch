@@ -9,9 +9,12 @@ from torch import nn
 @dataclasses.dataclass
 class LocopropCtx:
     learning_rate: float = 10
-    base_lr: float = 2e-5
     implicit: bool = False
     iterations: int = 5
+    base_lr: float = 2e-5
+    eps: float = 1e-6
+    momentum: float = 0.999
+    alpha: float = 0.9
 
 
 class LocoLayer(nn.Module):
@@ -24,7 +27,7 @@ class LocoLayer(nn.Module):
         self.lctx = copy.deepcopy(lctx)
         for k, v in kwargs.items():
             setattr(self.lctx, k, v)
-        self.opt = torch.optim.RMSprop(module.parameters(), lr=2e-5, eps=1e-6, momentum=0.999, alpha=0.9)
+        self.opt = torch.optim.RMSprop(module.parameters(), lr=lctx.base_lr, eps=lctx.eps, momentum=lctx.momentum, alpha=lctx.alpha)
 
     def inner(self, x):
         hidden = self.module(x)
@@ -57,10 +60,10 @@ class LocoFn(torch.autograd.Function):
                 out = ctx.module.module(inp)
                 act = ctx.module.activation(out)
             if i == 0:
+                next_grad, = torch.autograd.grad([act], [inp], [dy], allow_unused=True, retain_graph=True)
                 with torch.no_grad():
                     post_target = (act - ctx.lctx.learning_rate * dy).detach()
-                next_grad, = torch.autograd.grad([act], [inp], [dy], allow_unused=True, retain_graph=True)
-            torch.autograd.backward([out], [(act - post_target) / out.size(0)], inputs=list(ctx.module.parameters()))
+            torch.autograd.backward([act], [(act - post_target) / out.size(0)], inputs=list(ctx.module.parameters()))
             ctx.opt.step()
             ctx.opt.zero_grad()
         for n, p in ctx.module.named_parameters():
