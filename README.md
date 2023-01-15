@@ -3,7 +3,14 @@
 Implementation of the paper "LocoProp: Enhancing BackProp via Local Loss Optimization" in PyTorch.
 
 Paper: https://proceedings.mlr.press/v151/amid22a/amid22a.pdf
+
 Official code: https://github.com/google-research/google-research/blob/master/locoprop/locoprop_training.ipynb
+
+## Installation
+
+```
+pip install locoprop
+```
 
 ## Usage
 

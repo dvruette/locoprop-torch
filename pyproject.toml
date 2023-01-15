@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "locoprop"
+authors = [
+    {name = "Dimitri von Rütte"},
+]
+description = "LocoProp implementation in PyTorch."
+readme = "README.md"
+license = {file = "LICENSE"}
+urls = {github = "https://github.com/dvruette/locoprop-torch"}
+dependencies = ["torch"]
+dynamic = ["version"]
+
+[tool.setuptools.dynamic]
+version = {attr = "locoprop.__version__"}
