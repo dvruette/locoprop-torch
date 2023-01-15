@@ -10,9 +10,8 @@ from torch import nn
 class LocopropCtx:
     learning_rate: float = 10
     base_lr: float = 2e-5
-    implicit: bool = True
+    implicit: bool = False
     iterations: int = 5
-
 
 class LocoLayer(nn.Module):
     def __init__(self, module: nn.Module, activation: nn.Module, lctx: typing.Optional[LocopropCtx] = None, **kwargs):
@@ -22,7 +21,7 @@ class LocoLayer(nn.Module):
         if lctx is None:
             lctx = LocopropCtx()
         self.lctx = copy.deepcopy(lctx)
-        for k, v in kwargs:
+        for k, v in kwargs.items():
             setattr(self.lctx, k, v)
 
     def inner(self, x):
@@ -32,7 +31,7 @@ class LocoLayer(nn.Module):
         return hidden
 
     def forward(self, x):
-        return locofn(self, self.lctx, x)
+        return locofn(self, self.lctx, x.requires_grad_(True))
 
 
 class LocoFn(torch.autograd.Function):
@@ -65,8 +64,7 @@ class LocoFn(torch.autograd.Function):
             opt.zero_grad()
         for n, p in ctx.module.named_parameters():
             p.grad = original_params[n].data - p.data
-            p.data = original_params[n].data
-        ctx.module.requires_grad_(False)
+            p.data.set_(original_params[n].data)
         return None, None, grad
 
 
