@@ -1,17 +1,41 @@
+import dataclasses
 import typing
 import warnings
 
+import pytorch_lightning
 import torch
 from torch import nn
 from torch.nn import functional as F
+from typing import Optional
+
+
+@dataclasses.dataclass
+class LocopropCtx:
+    implicit: bool = False
+    learning_rate: float = 10
+    iterations: int = 5
+    correction: float = 0.1
+    correction_eps: float = 1e-5
+    optimizer: Optional[torch.optim.Optimizer] = None
+
+
+class GetGrad(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, y: torch.Tensor):
+        return x
+
+    @staticmethod
+    def backward(ctx, dy: torch.Tensor):
+        return dy, dy
 
 
 class LocoLayer(nn.Module):
-    def __init__(self, module, activation, implicit=False):
+    def __init__(self, module, activation, lctx: LocopropCtx):
         super().__init__()
         self.module = module
         self.activation = activation
-        self.implicit = implicit
+        self.storage_for_grad = None
+        self.lctx = lctx
 
     def forward(self, x=None, hidden=None):
         if x is None and hidden is None:
@@ -19,127 +43,73 @@ class LocoLayer(nn.Module):
 
         if hidden is None:
             hidden = self.module(x)
+        if self.storage_for_grad is None:
+            self.storage_for_grad = torch.empty_like(hidden, requires_grad=True)
+            hidden = GetGrad.apply(hidden, self.storage_for_grad)
+        else:
+            dy = self.storage_for_grad.grad
+            self.module.requires_grad_(True)
+            original_params = {n: p.clone() for n, p in self.module.named_parameters()}
+
+            opt = self.lctx.optimizer
+            base_lrs = [group["lr"] for group in opt.param_groups]
+            opt.zero_grad()
+
+            for i in range(self.lctx.iterations):
+                for base_lr, group in zip(base_lrs, opt.param_groups):
+                    group["lr"] = base_lr * max(1.0 - i / self.lctx.iterations, 0.25)
+                with torch.enable_grad():
+                    inp = x.detach().requires_grad_(True)
+                    a = self.module.module(inp)  # pre-activation
+                    y = self.module.activation(a)  # post-activation
+                if i == 0:
+                    old_out = a.detach()
+                    with torch.no_grad():
+                        post_target = (y - self.lctx.learning_rate * dy).detach()
+
+                torch.autograd.backward([y], [(y - post_target) / a.size(0)], inputs=list(self.module.parameters()))
+                opt.step()
+                opt.zero_grad()
+
+            for base_lr, group in zip(base_lrs, opt.param_groups):
+                group["lr"] = base_lr
+
+            for n, p in self.module.named_parameters():
+                p.grad = original_params[n].data - p.data
+                p.set_(original_params[n].data)
+            self.storage_for_grad = None
+
+            # correct input of next layer
+            if self.lctx.correction > 0:
+                with torch.no_grad():
+                    delta = self.module(inp) - old_out
+                    correction = self.lctx.correction / delta.std().clamp(min=self.lctx.correction_eps)
+                    hidden = old_out + correction.clamp(max=1) * delta
 
         if self.implicit:
             return hidden
+
         return self.activation(hidden)
 
 
-class LocopropTrainer:
-    def __init__(
-            self,
-            model: nn.Sequential,
-            loss_fn: typing.Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-            optimizer_class=torch.optim.RMSprop,
-            optimizer_hparams: typing.Dict = dict(lr=2e-5, eps=1e-6, momentum=0.999, alpha=0.9),
-            learning_rate: float = 10,
-            local_iterations: int = 5,
-            momentum: float = 0.0,
-            correction: float = 0.1,
-    ):
+class LocopropTrainer(pytorch_lightning.LightningModule):
+    def __init__(self, model: pytorch_lightning.LightningModule):
         self.model = model
-        self.loss_fn = loss_fn
-        self.learning_rate = learning_rate
-        self.local_iterations = local_iterations
-        self.momentum = momentum
-        self.correction = correction
 
-        self.opts = []
-        for layer in model:
-            trainable_params = sum(
-                p.numel() for p in layer.parameters() if p.requires_grad
-            )
-            if trainable_params > 0 and not isinstance(layer, LocoLayer):
-                warnings.warn(
-                    f"Layer {layer} is trainable but not a LocoLayer. Its parameters will not be updated."
-                )
+    def training_step(self, *args, **kwargs):
+        loss = self.model.training_step(*args, **kwargs)
+        loss.backward()
+        self.model.training_step(*args, **kwargs)
+        return loss.detach().requires_grad_(True)
 
-            if isinstance(layer, LocoLayer) and trainable_params > 0:
-                self.opts.append(
-                    optimizer_class(layer.parameters(), **optimizer_hparams)
-                )
-            else:
-                self.opts.append(None)
-        self.grads = []
+    def validation_step(self, *args, **kwargs):
+        return self.model.validation_step(*args, **kwargs)
 
-    def step(self, xs, ys):
-        inps = []
-        hiddens = []
-        curr = xs
+    def test_step(self, *args, **kwargs):
+        return self.model.test_step(*args, **kwargs)
 
-        for layer, opt in zip(self.model, self.opts):
-            inps.append(curr.detach())
-            if opt is not None and isinstance(layer, LocoLayer):
-                hidden = layer.module(curr)
-                hidden.requires_grad_(True)
-                hidden.retain_grad()
-                hiddens.append(hidden)
-                curr = layer(hidden=hidden)
-            else:
-                hiddens.append(None)
-                curr = layer(curr)
+    def predict_step(self, *args, **kwargs):
+        return self.model.predict_step(*args, **kwargs)
 
-        hidden_loss = self.loss_fn(curr, ys)
-        hidden_loss.backward()
-
-        grads = [None if h is None or not hasattr(h, "grad") or h.grad is None else h.grad for h in hiddens]
-        if self.momentum > 0:
-            if len(self.grads) == 0:
-                self.grads = grads
-            else:
-                self.grads = [None if m is None else (1 - self.momentum) * g + self.momentum * m for g, m in zip(grads, self.grads)]
-            grads = self.grads
-
-        for p in self.model.parameters():
-            p.requires_grad = True
-
-        for i, (opt, layer, grad) in enumerate(zip(self.opts, self.model, grads)):
-            if opt is None:
-                continue
-            if not isinstance(layer, LocoLayer):
-                raise ValueError(
-                    f"Expected trainable layers to be instance of `LocoLayer` but found `{layer.__class__}`")
-
-            inp = inps[i]
-            with torch.no_grad():
-                a = layer.module(inp)
-                y = layer.activation(a)
-                post_target = (y - self.learning_rate * grad).detach()
-
-            base_lr = opt.param_groups[0]["lr"]
-            for j in range(self.local_iterations):
-                opt.param_groups[0]["lr"] = base_lr * max(1.0 - j / self.local_iterations, 0.25)
-                opt.zero_grad()
-
-                """
-                Let `f := "activation function"` and `y = post_target`.
-
-                original:
-                ```
-                a = pseudo_inverse(y)
-                return grad((F(pre_act) - F(a) - f(a)^T * (pre_act - a)).sum())
-                ```
-
-                Since `a` is constant w.r.t. `pre_act`, it does not require gradients, so we can simplify:
-                `return grad((F(pre_act) - y^T * pre_act).sum())`
-                with `f(a) = f(pseudo_inverse(y)) = y` by definition of the pseudo-inverse.
-
-                The einsum can further be integrated using:
-                `backward(outputs=[F(pre_act), pre_act], grad_outputs=[ones_like(pre_act), -y])`
-
-                since `grad(F)(x) = f` by definition of `F`, this can be computed as:
-                `backward(outputs=[pre_act], grad_outputs=[f(pre_act) - y])`
-                """
-                pre_act = layer.module(inp)
-                torch.autograd.backward([pre_act], [(layer.activation(pre_act) - post_target) / inp.size(0)])
-                opt.step()
-            opt.param_groups[0]["lr"] = base_lr
-
-            # correct input of next layer
-            if self.correction > 0 and i + 1 < len(inps):
-                with torch.no_grad():
-                    delta = layer(inp) - inps[i + 1]
-                    norm = delta.norm() + 1e-5
-                    inps[i + 1] += min(norm, self.correction * delta.size(1) ** 0.5) * delta / norm
-
-        return hidden_loss
+    def configure_optimizers(self, *args, **kwargs):
+        return self.model.configure_optimizers(*args, **kwargs)
