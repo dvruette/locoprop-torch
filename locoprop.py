@@ -1,13 +1,10 @@
 import dataclasses
-import typing
-import warnings
+from contextlib import contextmanager
+from typing import Optional
 
 import pytorch_lightning
 import torch
 from torch import nn
-from torch.nn import functional as F
-from typing import Optional
-from contextlib import contextmanager
 
 TRAINING = False
 
@@ -123,8 +120,23 @@ class BackwardHook(torch.autograd.Function):
 
 
 class LocopropTrainer(pytorch_lightning.LightningModule):
-    def __init__(self, model: pytorch_lightning.LightningModule):
+    def __init__(self, model: pytorch_lightning.LightningModule,
+                 learning_rate: float = 10,
+                 iterations: int = 5,
+                 correction: float = 0.1,
+                 correction_eps: float = 1e-5,
+                 inner_opt_class: type = torch.optim.RMSprop,
+                 inner_opt_hparams: dict = dict(lr=2e-5, eps=1e-6, momentum=0.999, alpha=0.9), ):
         super().__init__()
+
+        for m in model.modules():
+            if isinstance(m, LocoLayer):
+                opt = inner_opt_class(m.parameters(), **inner_opt_hparams)
+                m.lctx.learning_rate = learning_rate
+                m.lctx.iterations = iterations
+                m.lctx.optimizer = opt
+                m.lctx.correction = correction
+                m.lctx.correction_eps = correction_eps
         self.model = model
 
     def forward(self, *args, **kwargs):
