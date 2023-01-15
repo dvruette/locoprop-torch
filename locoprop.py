@@ -7,6 +7,20 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from typing import Optional
+from contextlib import contextmanager
+
+TRAINING = False
+
+
+@contextmanager
+def is_training():
+    global TRAINING
+    try:
+        TRAINING = True
+        yield
+        TRAINING = False
+    finally:
+        TRAINING = False
 
 
 @dataclasses.dataclass
@@ -14,7 +28,7 @@ class LocopropCtx:
     implicit: bool = False
     learning_rate: float = 10
     iterations: int = 5
-    correction: float = 0.1
+    correction: float = 0.
     correction_eps: float = 1e-5
     optimizer: Optional[torch.optim.Optimizer] = None
 
@@ -30,23 +44,22 @@ class GetGrad(torch.autograd.Function):
 
 
 class LocoLayer(nn.Module):
-    def __init__(self, module, activation, lctx: LocopropCtx):
+    def __init__(self, module, activation, implicit=False):
         super().__init__()
         self.module = module
         self.activation = activation
         self.storage_for_grad = None
-        self.lctx = lctx
+        self.lctx = LocopropCtx(implicit=implicit)
 
     def forward(self, x=None, hidden=None):
         if x is None and hidden is None:
             raise ValueError("No argument was given. Provide either input or hidden state.")
 
-        if hidden is None:
+        if TRAINING and self.training and self.storage_for_grad is None:
             hidden = self.module(x)
-        if self.storage_for_grad is None:
             self.storage_for_grad = torch.empty_like(hidden, requires_grad=True)
             hidden = GetGrad.apply(hidden, self.storage_for_grad)
-        else:
+        elif TRAINING and self.training:
             dy = self.storage_for_grad.grad
             self.module.requires_grad_(True)
             original_params = {n: p.clone() for n, p in self.module.named_parameters()}
@@ -60,11 +73,11 @@ class LocoLayer(nn.Module):
                     group["lr"] = base_lr * max(1.0 - i / self.lctx.iterations, 0.25)
                 with torch.enable_grad():
                     inp = x.detach().requires_grad_(True)
-                    a = self.module.module(inp)  # pre-activation
-                    y = self.module.activation(a)  # post-activation
+                    a = self.module(inp)  # pre-activation
+                    y = self.activation(a)  # post-activation
                 if i == 0:
-                    old_out = a.detach()
                     with torch.no_grad():
+                        hidden = a.detach()
                         post_target = (y - self.lctx.learning_rate * dy).detach()
 
                 torch.autograd.backward([y], [(y - post_target) / a.size(0)], inputs=list(self.module.parameters()))
@@ -74,33 +87,58 @@ class LocoLayer(nn.Module):
             for base_lr, group in zip(base_lrs, opt.param_groups):
                 group["lr"] = base_lr
 
-            for n, p in self.module.named_parameters():
-                p.grad = original_params[n].data - p.data
-                p.set_(original_params[n].data)
+            with torch.no_grad():
+                for n, p in self.module.named_parameters():
+                    p.grad = original_params[n].data - p.data
+                    p.set_(original_params[n].data)
             self.storage_for_grad = None
 
             # correct input of next layer
             if self.lctx.correction > 0:
                 with torch.no_grad():
-                    delta = self.module(inp) - old_out
+                    delta = self.module(inp) - hidden
                     correction = self.lctx.correction / delta.std().clamp(min=self.lctx.correction_eps)
-                    hidden = old_out + correction.clamp(max=1) * delta
+                    hidden = hidden + correction.clamp(max=1) * delta
+        elif hidden is None:
+            hidden = self.module(x)
 
-        if self.implicit:
+        if self.lctx.implicit:
             return hidden
 
         return self.activation(hidden)
 
 
+class BackwardHook(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, args, model):
+        ctx.args = args
+        ctx.model = model
+        return x
+
+    @staticmethod
+    def backward(ctx, dy: torch.Tensor):
+        with is_training():
+            ctx.model.training_step(*ctx.args)
+        return None, None, None
+
+
 class LocopropTrainer(pytorch_lightning.LightningModule):
     def __init__(self, model: pytorch_lightning.LightningModule):
+        super().__init__()
         self.model = model
 
-    def training_step(self, *args, **kwargs):
-        loss = self.model.training_step(*args, **kwargs)
-        loss.backward()
-        self.model.training_step(*args, **kwargs)
-        return loss.detach().requires_grad_(True)
+    def forward(self, *args, **kwargs):
+        return self.model(*args, **kwargs)
+
+    def training_step(self, inputs, idx):
+        with is_training():
+            inputs = list(inputs)
+            for i, a in enumerate(inputs[:]):
+                if isinstance(a, torch.Tensor):
+                    inputs[i] = BackwardHook.apply(a.requires_grad_(True), (inputs, idx), self.model)
+                    break
+            loss = self.model.training_step(inputs, idx)
+        return loss
 
     def validation_step(self, *args, **kwargs):
         return self.model.validation_step(*args, **kwargs)
