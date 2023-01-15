@@ -25,48 +25,49 @@ class LocoLayer(nn.Module):
         for k, v in kwargs:
             setattr(self.lctx, k, v)
 
-    def forward(self, x=None, hidden=None):
-        if x is None and hidden is None:
-            raise ValueError("No argument was given. Provide either input or hidden state.")
-
-        if hidden is None:
-            hidden = self.module(x)
-
+    def inner(self, x):
+        hidden = self.module(x)
         if not self.lctx.implicit:
             hidden = self.activation(hidden)
+        return hidden
 
-        return locofn(self, hidden, self.lctx, (x,), {})
+    def forward(self, x):
+        return locofn(self, self.lctx, x)
 
 
 class LocoFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx: typing.Any, module: LocoLayer, out: torch.Tensor, lctx: LocopropCtx, args: list, kwargs: dict):
+    def forward(ctx: typing.Any, module: LocoLayer, lctx: LocopropCtx, inp: torch.Tensor):
         ctx.module = module
-        ctx.args = args
-        ctx.kwargs = kwargs
+        ctx.inp = inp
         ctx.lctx = lctx
-        return out
+        return module.inner(inp)
 
     @staticmethod
     def backward(ctx, dy: torch.Tensor):
         ctx.module.requires_grad_(True)
         opt = torch.optim.SGD(ctx.module.parameters(), ctx.lctx.base_lr)
         original_params = {n: p.clone() for n, p in ctx.module.named_parameters()}
+        inp = ctx.inp.detach().requires_grad_(True)
+        opt.zero_grad()
         for i in range(ctx.lctx.iterations):
             opt.param_groups[0]["lr"] = ctx.lctx.base_lr * max(1.0 - i / ctx.lctx.iterations, 0.25)
             with torch.enable_grad():
-                out = ctx.module.module(*ctx.args, **ctx.kwargs)
+                out = ctx.module.module(inp)
             if i == 0:
                 with torch.no_grad():
                     post_target = (out - ctx.lctx.learning_rate * dy).detach()
             torch.autograd.backward([out], [(ctx.module.activation(out) - post_target) / out.size(0)])
+            if i == 0:
+                grad = inp.grad
+            inp = inp.detach().requires_grad_(True)
             opt.step()
             opt.zero_grad()
         for n, p in ctx.module.named_parameters():
             p.grad = original_params[n].data - p.data
             p.data = original_params[n].data
         ctx.module.requires_grad_(False)
-        return None, dy, None, None, None, None, None
+        return None, None, grad
 
 
 locofn = LocoFn.apply
