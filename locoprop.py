@@ -13,6 +13,7 @@ class LocopropCtx:
     implicit: bool = False
     iterations: int = 5
 
+
 class LocoLayer(nn.Module):
     def __init__(self, module: nn.Module, activation: nn.Module, lctx: typing.Optional[LocopropCtx] = None, **kwargs):
         super().__init__()
@@ -23,6 +24,7 @@ class LocoLayer(nn.Module):
         self.lctx = copy.deepcopy(lctx)
         for k, v in kwargs.items():
             setattr(self.lctx, k, v)
+        self.opt = torch.optim.RMSprop(module.parameters(), lr=2e-5, eps=1e-6, momentum=0.999, alpha=0.9)
 
     def inner(self, x):
         hidden = self.module(x)
@@ -31,41 +33,40 @@ class LocoLayer(nn.Module):
         return hidden
 
     def forward(self, x):
-        return locofn(self, self.lctx, x.requires_grad_(True))
+        return locofn(self, self.lctx, self.opt, x.requires_grad_(True))
 
 
 class LocoFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx: typing.Any, module: LocoLayer, lctx: LocopropCtx, inp: torch.Tensor):
+    def forward(ctx: typing.Any, module: LocoLayer, lctx: LocopropCtx, opt: torch.optim.Optimizer, inp: torch.Tensor):
         ctx.module = module
         ctx.inp = inp
         ctx.lctx = lctx
+        ctx.opt = opt
         return module.inner(inp)
 
     @staticmethod
     def backward(ctx, dy: torch.Tensor):
         ctx.module.requires_grad_(True)
-        opt = torch.optim.SGD(ctx.module.parameters(), ctx.lctx.base_lr)
         original_params = {n: p.clone() for n, p in ctx.module.named_parameters()}
-        inp = ctx.inp.detach().requires_grad_(True)
-        opt.zero_grad()
+        ctx.opt.zero_grad()
         for i in range(ctx.lctx.iterations):
-            opt.param_groups[0]["lr"] = ctx.lctx.base_lr * max(1.0 - i / ctx.lctx.iterations, 0.25)
+            ctx.opt.param_groups[0]["lr"] = ctx.lctx.base_lr * max(1.0 - i / ctx.lctx.iterations, 0.25)
             with torch.enable_grad():
+                inp = ctx.inp.detach().requires_grad_(True)
                 out = ctx.module.module(inp)
+                act = ctx.module.activation(out)
             if i == 0:
                 with torch.no_grad():
-                    post_target = (out - ctx.lctx.learning_rate * dy).detach()
-            torch.autograd.backward([out], [(ctx.module.activation(out) - post_target) / out.size(0)])
-            if i == 0:
-                grad = inp.grad
-            inp = inp.detach().requires_grad_(True)
-            opt.step()
-            opt.zero_grad()
+                    post_target = (act - ctx.lctx.learning_rate * dy).detach()
+                next_grad, = torch.autograd.grad([act], [inp], [dy], allow_unused=True, retain_graph=True)
+            torch.autograd.backward([out], [(act - post_target) / out.size(0)], inputs=list(ctx.module.parameters()))
+            ctx.opt.step()
+            ctx.opt.zero_grad()
         for n, p in ctx.module.named_parameters():
             p.grad = original_params[n].data - p.data
             p.data.set_(original_params[n].data)
-        return None, None, grad
+        return None, None, None, next_grad
 
 
 locofn = LocoFn.apply
