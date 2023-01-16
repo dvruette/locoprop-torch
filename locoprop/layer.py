@@ -15,7 +15,6 @@ class LocopropCtx:
     learning_rate: float = 10
     iterations: int = 5
     correction: float = 0.
-    correction_eps: float = 1e-5
     optimizer: Optional[torch.optim.Optimizer] = None
 
 
@@ -90,8 +89,10 @@ class LocoLayer(nn.Module):
         # correct input of next layer
         with torch.no_grad():
             delta = self.module(*args, **kwargs) - hidden
-            norm = delta.flatten(1).norm(dim=1).clamp(min=self.lctx.correction_eps)
-            mag = (self.lctx.correction / norm * delta.flatten(1).size(1) ** 0.5).clamp(max=1)
+            flat = delta.flatten(1)
+            size = flat.size(1) ** 0.5
+            norm = flat.norm(dim=1).clamp(min=1 / size / self.lctx.correction)
+            mag = size * self.lctx.correction / norm
             delta = (mag.unsqueeze(-1) * delta.flatten(1)).view(*delta.shape)
             # => magnitude of delta is `correction * sqrt(n)` (n is dimension of hidden state)
             return hidden + delta
