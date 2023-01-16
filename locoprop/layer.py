@@ -90,8 +90,11 @@ class LocoLayer(nn.Module):
         # correct input of next layer
         with torch.no_grad():
             delta = self.module(*args, **kwargs) - hidden
-            correction = self.lctx.correction / delta.flatten(1).std(1).clamp(min=self.lctx.correction_eps)
-            return hidden + correction.clamp(max=1) * delta
+            norm = delta.flatten(1).norm(dim=1).clamp(min=self.lctx.correction_eps)
+            mag = (self.lctx.correction / norm * delta.flatten(1).size(1) ** 0.5).clamp(max=1)
+            delta = (mag.unsqueeze(-1) * delta.flatten(1)).view(*delta.shape)
+            # => magnitude of delta is `correction * sqrt(n)` (n is dimension of hidden state)
+            return hidden + delta
 
     def forward(self, *args, **kwargs):
         if _IS_TRAINING[0] and self.training:
