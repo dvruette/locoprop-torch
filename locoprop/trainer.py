@@ -49,7 +49,6 @@ class LocopropTrainer(nn.Module):
                  learning_rate: float = 10,
                  iterations: int = 5,
                  correction: float = 0.1,
-                 correction_eps: float = 1e-5,
                  inner_opt_class: type = torch.optim.RMSprop,
                  inner_opt_hparams: dict = dict(lr=2e-5, eps=1e-6, momentum=0.999, alpha=0.9)):
         super().__init__()
@@ -61,7 +60,6 @@ class LocopropTrainer(nn.Module):
                 m.lctx.iterations = iterations
                 m.lctx.optimizer = opt
                 m.lctx.correction = correction
-                m.lctx.correction_eps = correction_eps
         self.model = model
 
     def forward(self, *args, **kwargs):
