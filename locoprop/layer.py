@@ -4,6 +4,8 @@ from typing import Optional, Any
 import torch
 from torch import nn
 
+# Using a list to enable read/write operations by different modules.
+# Not strictly multiprocessing-compatible, expect unexpected behavior.
 _IS_TRAINING = [False]
 
 
